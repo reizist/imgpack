@@ -44,6 +44,11 @@ func run() error {
 	flag.BoolVar(&opt.DryRun, "dry-run", false, "実行せず処理内容だけ表示する")
 	flag.BoolVar(&silent, "silent", false, "進捗・ファイル名などの標準出力を抑制する(エラーのみ stderr)")
 
+	// 短縮エイリアス（同じ変数を共有）
+	flag.BoolVar(&opt.Overwrite, "o", false, "-overwrite の別名")
+	flag.BoolVar(&silent, "s", false, "-silent の別名")
+	flag.BoolVar(&opt.DryRun, "n", false, "-dry-run の別名")
+
 	flag.Usage = usage
 	flag.Parse()
 
@@ -92,6 +97,7 @@ func usage() {
   imgpack -from-dir .           # zipがあってもフォルダモードを強制
   imgpack -silent ~/Documents/DIR     # 出力(ファイル名など)を一切表示しない
   imgpack -dry-run .            # 何をするか確認だけ(実ファイルは変更しない)
+  imgpack -o -s ~/Documents/DIR # 短縮形: -o=-overwrite, -s=-silent, -n=-dry-run
 
 オプション:
 `)

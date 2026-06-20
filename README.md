@@ -68,6 +68,8 @@ imgpack.Run("/path/to/dir", opt)
 | `-silent` | `false` | 進捗・ファイル名などの標準出力を抑制（エラーのみ stderr） |
 | `-dry-run` | `false` | 実行せず内容だけ表示 |
 
+短縮形: `-o`=`-overwrite`, `-s`=`-silent`, `-n`=`-dry-run`。
+
 geometry 末尾の `>` は「縮小のみ（指定より小さい画像は拡大しない）」。デフォルトは `x1600>`。
 
 > 既定では元ファイルを残す（zip は `<name>_resized.zip` を別名出力、フォルダはソース画像を保持）。
