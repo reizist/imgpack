@@ -212,66 +212,101 @@ func TestFindZipsAndFolders(t *testing.T) {
 	}
 }
 
-func TestRunZipMode_WithFakeResizer(t *testing.T) {
-	root := t.TempDir()
-
-	// 入力 zip を作る: book/ 配下に png/jpg。
+func makeZip(t *testing.T, zipPath string, files map[string]string) {
+	t.Helper()
 	staging := t.TempDir()
-	writeFile(t, filepath.Join(staging, "book", "p001.png"), "P1")
-	writeFile(t, filepath.Join(staging, "book", "p002.jpg"), "J2")
-	zipPath := filepath.Join(root, "book.zip")
+	for rel, content := range files {
+		writeFile(t, filepath.Join(staging, filepath.FromSlash(rel)), content)
+	}
 	if err := ZipDir(staging, zipPath, "", DefaultExts()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestRunZipMode_DefaultKeepsOriginal(t *testing.T) {
+	root := t.TempDir()
+	zipPath := filepath.Join(root, "book.zip")
+	makeZip(t, zipPath, map[string]string{"book/p001.png": "P1", "book/p002.jpg": "J2"})
+	orig, _ := os.Stat(zipPath)
 
 	fr := &fakeResizer{}
-	opt := DefaultOptions()
+	opt := DefaultOptions() // Overwrite=false, Suffix="_resized"
 	opt.Resizer = fr
 
 	if err := Run(root, opt); err != nil {
 		t.Fatal(err)
 	}
 
-	// リサイズが正しい geometry で、解凍された画像 2 枚に対して呼ばれた。
-	if len(fr.calls) == 0 {
-		t.Fatal("Resizer が呼ばれていない")
+	// リサイズは x1600> で解凍画像 2 枚に対して呼ばれた。
+	if got := len(fr.allFiles()); got != 2 {
+		t.Errorf("リサイズ対象 = %d 枚, want 2", got)
 	}
 	for _, c := range fr.calls {
 		if c.geometry != "x1600>" {
 			t.Errorf("geometry = %q, want x1600>", c.geometry)
 		}
 	}
-	if got := len(fr.allFiles()); got != 2 {
-		t.Errorf("リサイズ対象 = %d 枚, want 2", got)
-	}
 
-	// 元 zip が残り、一時ディレクトリは掃除されている（root 直下は zip のみ）。
-	entries, _ := os.ReadDir(root)
-	for _, e := range entries {
-		if e.Name() != "book.zip" {
-			t.Errorf("想定外の残存物: %s", e.Name())
-		}
+	// 元 zip は無変更で残り、_resized.zip が新規生成される。
+	after, _ := os.Stat(zipPath)
+	if after.ModTime() != orig.ModTime() || after.Size() != orig.Size() {
+		t.Error("元 zip が書き換わった（残すべき）")
 	}
-
-	// 再zip後も構造が保持されている。
+	out := filepath.Join(root, "book_resized.zip")
 	ex := t.TempDir()
-	if err := ExtractZip(zipPath, ex); err != nil {
-		t.Fatal(err)
+	if err := ExtractZip(out, ex); err != nil {
+		t.Fatalf("book_resized.zip が読めない: %v", err)
 	}
 	for _, p := range []string{"book/p001.png", "book/p002.jpg"} {
 		if _, err := os.Stat(filepath.Join(ex, filepath.FromSlash(p))); err != nil {
-			t.Errorf("再zip後に %q が無い: %v", p, err)
+			t.Errorf("出力に %q が無い: %v", p, err)
+		}
+	}
+	// 一時ディレクトリが残っていない。
+	for _, e := range mustReadDir(t, root) {
+		if e.IsDir() {
+			t.Errorf("一時ディレクトリが残存: %s", e.Name())
 		}
 	}
 }
 
-func TestRunDirMode_WithFakeResizer(t *testing.T) {
+func TestRunZipMode_OverwriteReplacesOriginal(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, filepath.Join(root, "ch01", "a.png"), "A")
-	writeFile(t, filepath.Join(root, "ch01", "b.jpg"), "B")
+	makeZip(t, filepath.Join(root, "book.zip"), map[string]string{"book/p001.png": "P1"})
+
+	opt := DefaultOptions()
+	opt.Overwrite = true
+	opt.Resizer = &fakeResizer{}
+	if err := Run(root, opt); err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range mustReadDir(t, root) {
+		if e.Name() != "book.zip" {
+			t.Errorf("想定外の残存物: %s（上書き時は元名のみ）", e.Name())
+		}
+	}
+}
+
+func TestRunZipMode_SkipsAlreadyResized(t *testing.T) {
+	root := t.TempDir()
+	// 出力済み(_resized)のみが存在 → 入力対象なしでエラー（二重サフィックス防止）。
+	makeZip(t, filepath.Join(root, "book_resized.zip"), map[string]string{"book/p.png": "P"})
+	opt := DefaultOptions()
+	opt.Resizer = &fakeResizer{}
+	if err := Run(root, opt); err == nil {
+		t.Fatal("_resized のみのとき対象なしエラーを期待")
+	}
+}
+
+func TestRunDirMode_DefaultPreservesSourceImages(t *testing.T) {
+	root := t.TempDir()
+	a := filepath.Join(root, "ch01", "a.png")
+	b := filepath.Join(root, "ch01", "b.jpg")
+	writeFile(t, a, "A")
+	writeFile(t, b, "B")
 
 	fr := &fakeResizer{}
-	opt := DefaultOptions()
+	opt := DefaultOptions() // Overwrite=false
 	opt.Resizer = fr
 
 	if err := Run(root, opt); err != nil {
@@ -280,7 +315,18 @@ func TestRunDirMode_WithFakeResizer(t *testing.T) {
 	if got := len(fr.allFiles()); got != 2 {
 		t.Errorf("リサイズ対象 = %d 枚, want 2", got)
 	}
-	// <folder>.zip が生成されている。
+	// リサイズは一時コピーに対して行われ、ソース画像のパスは触られていない。
+	for _, c := range fr.calls {
+		for _, f := range c.files {
+			if f == a || f == b {
+				t.Errorf("ソース画像が直接リサイズされた: %s", f)
+			}
+		}
+	}
+	// ソース画像は元のまま、<folder>.zip は生成。
+	if got := readFile(t, a); got != "A" {
+		t.Errorf("ソース画像が変化: %q", got)
+	}
 	if _, err := os.Stat(filepath.Join(root, "ch01.zip")); err != nil {
 		t.Errorf("ch01.zip が生成されていない: %v", err)
 	}
@@ -340,6 +386,15 @@ func readFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func mustReadDir(t *testing.T, dir string) []os.DirEntry {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
 }
 
 func keys(m map[string]uint16) []string {

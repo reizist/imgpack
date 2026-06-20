@@ -20,6 +20,14 @@ type Options struct {
 	Zip      bool     // フォルダモードで zip 生成を実行するか（zip モードでは常に再zip）
 	FromDir  bool     // zip があってもフォルダモードを強制する
 
+	// Overwrite が false（既定）なら元ファイルを残す:
+	//   zip モード     … 元zipは触らず <name><Suffix>.zip を出力
+	//   フォルダモード … ソース画像を破壊せず一時コピーをリサイズして <folder>.zip を出力
+	// true なら従来どおり元を上書き（zip は同名、フォルダはインプレースでリサイズ）。
+	Overwrite bool
+	// Suffix は Overwrite=false の zip モード出力に付ける接尾辞（既定 "_resized"）。
+	Suffix string
+
 	// Resizer は nil なら MagickResizer を自動利用する。
 	Resizer Resizer
 	// Logf は進捗ログの出力先。nil なら無出力。
@@ -36,6 +44,7 @@ func DefaultOptions() Options {
 		Zip:    true,
 		Jobs:   runtime.NumCPU(),
 		Exts:   DefaultExts(),
+		Suffix: "_resized",
 	}
 }
 
@@ -58,6 +67,10 @@ func (o Options) resolve() (Options, error) {
 	}
 	if !r.Resize && !r.Zip {
 		return r, fmt.Errorf("Resize と Zip の両方が無効です。何も実行されません")
+	}
+	if !r.Overwrite && strings.TrimSpace(r.Suffix) == "" {
+		// 上書きしないのに接尾辞が空だと出力が元と衝突するため既定値を補う。
+		r.Suffix = "_resized"
 	}
 	if r.Resize && r.Resizer == nil && !r.DryRun {
 		bin, err := LookupMagick()
@@ -111,9 +124,25 @@ func Run(target string, opt Options) error {
 }
 
 func runZips(zips []string, opt Options) error {
+	// 上書きしない場合、過去の出力(<name><Suffix>.zip)を入力から除外して
+	// 二重サフィックス(<name><Suffix><Suffix>.zip)を防ぐ。
+	if !opt.Overwrite {
+		var in []string
+		for _, z := range zips {
+			if stemHasSuffix(z, opt.Suffix) {
+				continue
+			}
+			in = append(in, z)
+		}
+		zips = in
+		if len(zips) == 0 {
+			return fmt.Errorf("処理対象の zip が見つかりません（%q 付きは出力とみなして除外）", opt.Suffix)
+		}
+	}
+
 	opt.Logf("zipモード: %d 個の zip / geometry=%q jobs=%d quality=%s%s\n",
 		len(zips), opt.ResolveGeometry(), opt.Jobs, qualityLabel(opt.Quality), dryLabel(opt.DryRun))
-	opt.Logf("各zip: 解凍 → リサイズ → 再zip(上書き)\n")
+	opt.Logf("各zip: 解凍 → リサイズ → %s\n", zipOutLabel(opt))
 
 	var failed int
 	for i, z := range zips {
@@ -166,13 +195,18 @@ func ProcessZip(zipPath string, opt Options) error {
 }
 
 func processZip(zipPath string, opt Options) error {
+	dest := zipPath
+	if !opt.Overwrite {
+		dest = withSuffix(zipPath, opt.Suffix)
+	}
+
 	if opt.DryRun {
 		n, err := CountImagesInZip(zipPath, opt.Exts)
 		if err != nil {
 			return err
 		}
-		opt.Logf("  - 画像 %d 枚をリサイズ(geometry=%q) → %s を上書き\n",
-			n, opt.ResolveGeometry(), filepath.Base(zipPath))
+		opt.Logf("  - 画像 %d 枚をリサイズ(geometry=%q) → %s\n",
+			n, opt.ResolveGeometry(), zipDestLabel(zipPath, dest, opt.Overwrite))
 		return nil
 	}
 
@@ -201,9 +235,9 @@ func processZip(zipPath string, opt Options) error {
 		}
 	}
 
-	// 元と同じ内部構造（prefix 無し）で再zipし、上書き。
-	opt.Logf("  - 再zip(上書き) %s\n", filepath.Base(zipPath))
-	return ZipDir(tmpDir, zipPath, "", opt.Exts)
+	// 元と同じ内部構造（prefix 無し）で zip 出力。元zipは Overwrite 時のみ上書き。
+	opt.Logf("  - 再zip → %s\n", zipDestLabel(zipPath, dest, opt.Overwrite))
+	return ZipDir(tmpDir, dest, "", opt.Exts)
 }
 
 // ProcessFolder はフォルダ内の画像をインプレースでリサイズし <dir>.zip を生成する。
@@ -216,26 +250,48 @@ func ProcessFolder(dir string, opt Options) error {
 }
 
 func processFolder(dir string, opt Options) error {
+	if opt.DryRun {
+		if opt.Resize {
+			n := len(listImages(dir, opt.Exts))
+			opt.Logf("  - リサイズ %d 枚 (geometry=%q)%s\n", n, opt.ResolveGeometry(), inplaceLabel(opt.Overwrite))
+		}
+		if opt.Zip {
+			opt.Logf("  - zip 生成 %s\n", filepath.Base(dir)+".zip")
+		}
+		return nil
+	}
+
+	// リサイズ対象ディレクトリ。Overwrite=false なら一時コピーを作り、
+	// ソース画像を破壊せずにそちらをリサイズして zip にする。
+	src := dir
+	if opt.Resize && !opt.Overwrite {
+		tmp, err := os.MkdirTemp(filepath.Dir(dir), ".imgpack-"+filepath.Base(dir)+"-")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmp)
+		if err := copyTree(dir, tmp); err != nil {
+			return err
+		}
+		src = tmp
+	}
+
 	if opt.Resize {
-		files := listImages(dir, opt.Exts)
+		files := listImages(src, opt.Exts)
 		if len(files) == 0 {
 			opt.Logf("  - 画像なし。リサイズskip\n")
 		} else {
-			opt.Logf("  - リサイズ %d 枚 (geometry=%q)\n", len(files), opt.ResolveGeometry())
-			if !opt.DryRun {
-				if err := opt.Resizer.Resize(files, opt.ResolveGeometry(), opt.Quality, opt.Jobs); err != nil {
-					return err
-				}
+			opt.Logf("  - リサイズ %d 枚 (geometry=%q)%s\n", len(files), opt.ResolveGeometry(), inplaceLabel(opt.Overwrite))
+			if err := opt.Resizer.Resize(files, opt.ResolveGeometry(), opt.Quality, opt.Jobs); err != nil {
+				return err
 			}
 		}
 	}
 	if opt.Zip {
 		zipPath := dir + ".zip"
 		opt.Logf("  - zip 生成 %s\n", filepath.Base(zipPath))
-		if !opt.DryRun {
-			if err := ZipDir(dir, zipPath, filepath.Base(dir), opt.Exts); err != nil {
-				return err
-			}
+		if err := ZipDir(src, zipPath, filepath.Base(dir), opt.Exts); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -325,6 +381,42 @@ func listImagesRecursive(dir string, exts []string) []string {
 		return nil
 	})
 	return sortedStrings(files)
+}
+
+// withSuffix は zip パスの拡張子前に suffix を挿入する（book.zip + _resized → book_resized.zip）。
+func withSuffix(zipPath, suffix string) string {
+	ext := filepath.Ext(zipPath)
+	return strings.TrimSuffix(zipPath, ext) + suffix + ext
+}
+
+// stemHasSuffix は zip の拡張子を除いた名前が suffix で終わるか（過去の出力か）を返す。
+func stemHasSuffix(zipPath, suffix string) bool {
+	if suffix == "" {
+		return false
+	}
+	ext := filepath.Ext(zipPath)
+	return strings.HasSuffix(strings.TrimSuffix(zipPath, ext), suffix)
+}
+
+func zipOutLabel(opt Options) string {
+	if opt.Overwrite {
+		return "再zip(元を上書き)"
+	}
+	return "別名で出力(元を保持: <name>" + opt.Suffix + ".zip)"
+}
+
+func zipDestLabel(srcZip, dest string, overwrite bool) string {
+	if overwrite {
+		return filepath.Base(dest) + " (上書き)"
+	}
+	return filepath.Base(dest) + " (元 " + filepath.Base(srcZip) + " は保持)"
+}
+
+func inplaceLabel(overwrite bool) string {
+	if overwrite {
+		return " [インプレース]"
+	}
+	return " [元を保持]"
 }
 
 func dryLabel(dry bool) string {
