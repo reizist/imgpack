@@ -26,6 +26,7 @@ func run() error {
 	var (
 		extsCSV string
 		zipOnly bool
+		silent  bool
 	)
 
 	flag.IntVar(&opt.Height, "height", opt.Height, "高さの上限(px)。長辺を縦に揃える既定運用。0 で未指定")
@@ -41,6 +42,7 @@ func run() error {
 	flag.StringVar(&opt.Suffix, "suffix", opt.Suffix, "上書きしない時に zip 出力へ付ける接尾辞")
 	flag.BoolVar(&opt.FromDir, "from-dir", false, "zip があってもフォルダモードを強制する")
 	flag.BoolVar(&opt.DryRun, "dry-run", false, "実行せず処理内容だけ表示する")
+	flag.BoolVar(&silent, "silent", false, "進捗・ファイル名などの標準出力を抑制する(エラーのみ stderr)")
 
 	flag.Usage = usage
 	flag.Parse()
@@ -52,8 +54,10 @@ func run() error {
 		opt.Resize = false
 		opt.Zip = true
 	}
-	// 進捗は標準出力へ。
-	opt.Logf = func(format string, args ...interface{}) { fmt.Printf(format, args...) }
+	// 進捗は標準出力へ。-silent の場合は出力しない(Logf を nil のままにし、無出力にする)。
+	if !silent {
+		opt.Logf = func(format string, args ...interface{}) { fmt.Printf(format, args...) }
+	}
 
 	target := "."
 	if flag.NArg() > 0 {
@@ -86,6 +90,7 @@ func usage() {
   imgpack -quality 85 .         # jpg/avif/webp の品質指定
   imgpack -ext png .            # png だけを対象に
   imgpack -from-dir .           # zipがあってもフォルダモードを強制
+  imgpack -silent ~/Documents/DIR     # 出力(ファイル名など)を一切表示しない
   imgpack -dry-run .            # 何をするか確認だけ(実ファイルは変更しない)
 
 オプション:

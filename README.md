@@ -65,6 +65,7 @@ imgpack.Run("/path/to/dir", opt)
 | `-overwrite` | `false` | 元ファイルを上書き（zip は同名／フォルダはインプレース）。既定は元を残す |
 | `-suffix` | `_resized` | 上書きしない時に zip 出力へ付ける接尾辞 |
 | `-from-dir` | `false` | zip があってもフォルダモードを強制 |
+| `-silent` | `false` | 進捗・ファイル名などの標準出力を抑制（エラーのみ stderr） |
 | `-dry-run` | `false` | 実行せず内容だけ表示 |
 
 geometry 末尾の `>` は「縮小のみ（指定より小さい画像は拡大しない）」。デフォルトは `x1600>`。
