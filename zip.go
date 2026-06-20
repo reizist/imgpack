@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
+
+	"golang.org/x/text/encoding/japanese"
 )
 
 // ExtractZip は zipPath を destDir へ安全に展開する（Zip Slip 対策込み）。
@@ -22,11 +25,14 @@ func ExtractZip(zipPath, destDir string) error {
 		return err
 	}
 	for _, f := range zr.File {
-		target := filepath.Join(destDir, f.Name)
+		// 日本語 Windows 製 zip はエントリ名が Shift-JIS(CP932)で UTF-8 フラグ無しのことが多い。
+		// そのままだと macOS 等で不正バイト列となり mkdir 失敗するため UTF-8 へ変換する。
+		name := decodeEntryName(f)
+		target := filepath.Join(destDir, name)
 		// パストラバーサル防止: 展開先が destDir の外を指さないことを保証。
 		rel, err := filepath.Rel(destAbs, mustAbs(target))
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
-			return fmt.Errorf("不正なパスを含む zip エントリ: %s", f.Name)
+			return fmt.Errorf("不正なパスを含む zip エントリ: %s", name)
 		}
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(target, 0o755); err != nil {
@@ -42,6 +48,19 @@ func ExtractZip(zipPath, destDir string) error {
 		}
 	}
 	return nil
+}
+
+// decodeEntryName は zip エントリ名を UTF-8 文字列として返す。
+// UTF-8 フラグが無く不正バイト列の場合は Shift-JIS(CP932) とみなして変換する。
+func decodeEntryName(f *zip.File) string {
+	name := f.Name
+	if !f.NonUTF8 && utf8.ValidString(name) {
+		return name
+	}
+	if dec, err := japanese.ShiftJIS.NewDecoder().String(name); err == nil && utf8.ValidString(dec) {
+		return dec
+	}
+	return name // 変換不能ならそのまま（後段で失敗し得る）
 }
 
 func extractFile(f *zip.File, target string) error {

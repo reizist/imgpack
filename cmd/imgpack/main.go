@@ -63,16 +63,18 @@ func run() error {
 }
 
 func usage() {
-	fmt.Fprintf(os.Stderr, `imgpack - 画像フォルダ/zip を一括リサイズして(再)zipする
+	fmt.Fprintf(os.Stderr, `imgpack - 画像アーカイブ/フォルダを一括リサイズして zip 出力する
 
 使い方:
   imgpack [オプション] [対象ディレクトリ]
 
 既定では元ファイルを残す。対象ディレクトリ(省略時はカレント)を見て自動でモードを選ぶ:
-  - 直下に *.zip があれば zipモード:
-      各zipを「解凍 → リサイズ → 同じ構造で zip 出力」。
-      既定は元zipを残して <name>_resized.zip を出力。-overwrite で元を上書き。
-  - zipが無ければ フォルダモード:
+  - 直下に *.zip/*.cbz/*.rar/*.cbr があればアーカイブモード:
+      各アーカイブを「解凍 → リサイズ → 同じ構造で zip 出力」。
+      既定は元を残して <name>_resized.zip を出力。-overwrite で元を上書き。
+      ※ rar/cbr の展開には unrar(無ければ 7z/bsdtar) が必要。出力は常に zip。
+      ※ Shift-JIS(日本語Windows製) のエントリ名も UTF-8 へ変換して展開。
+  - アーカイブが無ければ フォルダモード:
       直下の各画像フォルダ(または直下の画像)をリサイズし <folder>.zip を生成。
       既定はソース画像を残す(一時コピーを変換)。-overwrite でインプレース変換。
 

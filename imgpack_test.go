@@ -13,6 +13,8 @@ import (
 	"sort"
 	"sync"
 	"testing"
+
+	"golang.org/x/text/encoding/japanese"
 )
 
 // fakeResizer は Resize の呼び出しを記録するだけのテスト用 Resizer。
@@ -167,6 +169,36 @@ func TestZipDirAndExtractRoundTrip(t *testing.T) {
 	}
 }
 
+func TestExtractZip_ShiftJISNames(t *testing.T) {
+	// 日本語名を Shift-JIS で格納（UTF-8 フラグ無し）した zip を作る。
+	jisName, err := japanese.ShiftJIS.NewEncoder().String("漫画/0001.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: jisName, Method: zip.Store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write([]byte("img"))
+	zw.Close()
+
+	zpath := filepath.Join(t.TempDir(), "sjis.zip")
+	if err := os.WriteFile(zpath, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := t.TempDir()
+	if err := ExtractZip(zpath, dest); err != nil {
+		t.Fatalf("Shift-JIS 名の展開に失敗: %v", err)
+	}
+	// UTF-8 にデコードされた正しいパスでファイルが置かれている。
+	if _, err := os.Stat(filepath.Join(dest, "漫画", "0001.jpg")); err != nil {
+		t.Errorf("UTF-8 デコードされたパスが無い: %v", err)
+	}
+}
+
 func TestExtractZipSlip(t *testing.T) {
 	// "../evil" を名前に持つ不正な zip を作る。
 	var buf bytes.Buffer
@@ -284,6 +316,73 @@ func TestRunZipMode_OverwriteReplacesOriginal(t *testing.T) {
 		if e.Name() != "book.zip" {
 			t.Errorf("想定外の残存物: %s（上書き時は元名のみ）", e.Name())
 		}
+	}
+}
+
+func TestFindArchives(t *testing.T) {
+	root := t.TempDir()
+	for _, n := range []string{"a.zip", "b.CBZ", "c.rar", "d.cbr", "note.txt", ".hidden.zip"} {
+		writeFile(t, filepath.Join(root, n), "x")
+	}
+	got, err := FindArchives(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("FindArchives = %v, want 4 件(zip/cbz/rar/cbr)", got)
+	}
+}
+
+func TestRunArchive_Rar_WithFakeExtractor(t *testing.T) {
+	root := t.TempDir()
+	// 中身は使わないダミーの rar ファイル。
+	writeFile(t, filepath.Join(root, "comic.rar"), "RAR-DUMMY")
+
+	fr := &fakeResizer{}
+	opt := DefaultOptions()
+	opt.Resizer = fr
+	// 展開を差し替え（外部 unrar 不要）: 画像を 1 枚 dest に置く。
+	opt.RarExtractor = func(src, dest string) error {
+		writeFile(t, filepath.Join(dest, "comic", "0001.jpg"), "J")
+		return nil
+	}
+
+	if err := Run(root, opt); err != nil {
+		t.Fatal(err)
+	}
+	// rar が展開され 1 枚リサイズされた。
+	if got := len(fr.allFiles()); got != 1 {
+		t.Errorf("リサイズ対象 = %d 枚, want 1", got)
+	}
+	// 出力は zip、元 rar は保持。
+	if _, err := os.Stat(filepath.Join(root, "comic_resized.zip")); err != nil {
+		t.Errorf("comic_resized.zip が無い: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "comic.rar")); err != nil {
+		t.Errorf("元 comic.rar が消えた（保持すべき）: %v", err)
+	}
+}
+
+func TestRunArchive_Rar_OverwriteReplacesWithZip(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "comic.rar"), "RAR-DUMMY")
+
+	opt := DefaultOptions()
+	opt.Overwrite = true
+	opt.Resizer = &fakeResizer{}
+	opt.RarExtractor = func(src, dest string) error {
+		writeFile(t, filepath.Join(dest, "comic", "0001.jpg"), "J")
+		return nil
+	}
+	if err := Run(root, opt); err != nil {
+		t.Fatal(err)
+	}
+	// rar は zip に置換され、元 rar は削除される。
+	if _, err := os.Stat(filepath.Join(root, "comic.zip")); err != nil {
+		t.Errorf("comic.zip が無い: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "comic.rar")); !os.IsNotExist(err) {
+		t.Errorf("元 comic.rar が残っている（削除すべき）")
 	}
 }
 

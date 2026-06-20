@@ -2,17 +2,21 @@
 
 フォルダや zip の中の画像を、形式（png/jpg/avif/…）を問わず一括でリサイズして zip に戻す CLI
 
-zip を指定すると「解凍 → リサイズ → 同じ構造で zip 出力」までやる。
+zip / cbz / rar / cbr を解凍 →（形式問わず）リサイズ → 同じ構造で zip 出力、までやる。
 デフォルトは元ファイルを残し、`<name>_resized.zip` を別名で出力する（`-overwrite` で元を上書き）。
 リサイズ自体は ImageMagick（`magick mogrify`）に投げているので、IM が読める形式はそのまま扱える。
+
+- 入力: `.zip` / `.cbz`（= zip）, `.rar` / `.cbr`（rar）。出力は常に zip（rar は作成できないため）。
+- rar/cbr の展開には `unrar`（無ければ `7z` / `bsdtar`）が必要。
+- 日本語 Windows 製 zip にありがちな Shift-JIS のファイル名も UTF-8 に変換して展開する。
 
 ## USAGE
 
 ```sh
-# インストール（要 ImageMagick: brew install imagemagick）
+# インストール（要 ImageMagick: brew install imagemagick / rar入力には: brew install unrar）
 go install github.com/reizist/imgpack/cmd/imgpack@latest
 
-# zip の入ったフォルダを渡す → 各 zip を解凍・リサイズし <name>_resized.zip を出力（元は残す）
+# アーカイブの入ったフォルダを渡す → 各 zip/rar を解凍・リサイズし <name>_resized.zip を出力（元は残す）
 imgpack ~/Documents/DIR
 
 # 元 zip を上書きしたいとき
@@ -30,9 +34,9 @@ imgpack -dry-run ~/Documents/DIR
 
 対象ディレクトリを省略した場合カレントを対象にする。
 
-- 直下に `*.zip` がある → 各 zip を解凍 → リサイズ → zip 出力。展開物は残さない。
-  既定は元 zip を残して `<name>_resized.zip` を出力（`-overwrite` で元を上書き）。
-- zip が無く画像フォルダがある → 各フォルダをリサイズして `<folder>.zip` を作る。
+- 直下に `*.zip`/`*.cbz`/`*.rar`/`*.cbr` がある → 各アーカイブを解凍 → リサイズ → zip 出力。展開物は残さない。
+  既定は元を残して `<name>_resized.zip` を出力（`-overwrite` で元を上書き。rar は zip 化して元を置換）。
+- アーカイブが無く画像フォルダがある → 各フォルダをリサイズして `<folder>.zip` を作る。
   既定はソース画像を残す（一時コピーを変換）。`-overwrite` でその場（インプレース）変換。
 
 ライブラリとしても使える:

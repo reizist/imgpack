@@ -30,6 +30,8 @@ type Options struct {
 
 	// Resizer は nil なら MagickResizer を自動利用する。
 	Resizer Resizer
+	// RarExtractor は rar/cbr の展開処理。nil なら外部ツール(unrar/7z/bsdtar)を使う。
+	RarExtractor func(src, destDir string) error
 	// Logf は進捗ログの出力先。nil なら無出力。
 	Logf func(format string, args ...interface{})
 	// DryRun が true なら、解凍・上書き・リサイズを行わず計画のみログ出力する。
@@ -113,50 +115,67 @@ func Run(target string, opt Options) error {
 		return err
 	}
 
-	zips, err := FindZips(abs)
+	archives, err := FindArchives(abs)
 	if err != nil {
 		return err
 	}
-	if len(zips) > 0 && !r.FromDir {
-		return runZips(zips, r)
+	if len(archives) > 0 && !r.FromDir {
+		return runArchives(archives, r)
 	}
 	return runFolders(abs, r)
 }
 
-func runZips(zips []string, opt Options) error {
+func runArchives(archives []string, opt Options) error {
 	// 上書きしない場合、過去の出力(<name><Suffix>.zip)を入力から除外して
 	// 二重サフィックス(<name><Suffix><Suffix>.zip)を防ぐ。
 	if !opt.Overwrite {
 		var in []string
-		for _, z := range zips {
-			if stemHasSuffix(z, opt.Suffix) {
+		for _, a := range archives {
+			if stemHasSuffix(a, opt.Suffix) {
 				continue
 			}
-			in = append(in, z)
+			in = append(in, a)
 		}
-		zips = in
-		if len(zips) == 0 {
-			return fmt.Errorf("処理対象の zip が見つかりません（%q 付きは出力とみなして除外）", opt.Suffix)
+		archives = in
+		if len(archives) == 0 {
+			return fmt.Errorf("処理対象のアーカイブが見つかりません（%q 付きは出力とみなして除外）", opt.Suffix)
 		}
 	}
 
-	opt.Logf("zipモード: %d 個の zip / geometry=%q jobs=%d quality=%s%s\n",
-		len(zips), opt.ResolveGeometry(), opt.Jobs, qualityLabel(opt.Quality), dryLabel(opt.DryRun))
-	opt.Logf("各zip: 解凍 → リサイズ → %s\n", zipOutLabel(opt))
+	opt.Logf("アーカイブモード: %d 個 (zip/rar) / geometry=%q jobs=%d quality=%s%s\n",
+		len(archives), opt.ResolveGeometry(), opt.Jobs, qualityLabel(opt.Quality), dryLabel(opt.DryRun))
+	opt.Logf("各アーカイブ: 解凍 → リサイズ → %s\n", zipOutLabel(opt))
 
-	var failed int
-	for i, z := range zips {
-		opt.Logf("\n[%d/%d] %s\n", i+1, len(zips), filepath.Base(z))
-		if err := processZip(z, opt); err != nil {
-			failed++
+	var failures []failure
+	for i, a := range archives {
+		opt.Logf("\n[%d/%d] %s\n", i+1, len(archives), filepath.Base(a))
+		if err := processArchive(a, opt); err != nil {
+			failures = append(failures, failure{filepath.Base(a), err})
 			opt.Logf("  ! 失敗: %v\n", err)
 		}
 	}
-	opt.Logf("\n完了: %d 成功 / %d 失敗\n", len(zips)-failed, failed)
-	if failed > 0 {
-		return fmt.Errorf("%d 個の zip で失敗しました", failed)
+	opt.Logf("\n完了: %d 成功 / %d 失敗\n", len(archives)-len(failures), len(failures))
+	logFailures(opt, failures)
+	if len(failures) > 0 {
+		return fmt.Errorf("%d 個のアーカイブで失敗しました", len(failures))
 	}
 	return nil
+}
+
+// failure は失敗した 1 件（表示用）。
+type failure struct {
+	name string
+	err  error
+}
+
+func logFailures(opt Options, failures []failure) {
+	if len(failures) == 0 {
+		return
+	}
+	opt.Logf("\n失敗した %d 件:\n", len(failures))
+	for _, f := range failures {
+		opt.Logf("  - %s\n", f.name)
+	}
 }
 
 func runFolders(root string, opt Options) error {
@@ -170,56 +189,70 @@ func runFolders(root string, opt Options) error {
 	opt.Logf("フォルダモード: %d フォルダ / geometry=%q jobs=%d resize=%v zip=%v%s\n",
 		len(folders), opt.ResolveGeometry(), opt.Jobs, opt.Resize, opt.Zip, dryLabel(opt.DryRun))
 
-	var failed int
+	var failures []failure
 	for i, dir := range folders {
 		opt.Logf("\n[%d/%d] %s\n", i+1, len(folders), dir)
 		if err := processFolder(dir, opt); err != nil {
-			failed++
+			failures = append(failures, failure{filepath.Base(dir), err})
 			opt.Logf("  ! 失敗: %v\n", err)
 		}
 	}
-	opt.Logf("\n完了: %d 成功 / %d 失敗\n", len(folders)-failed, failed)
-	if failed > 0 {
-		return fmt.Errorf("%d フォルダで失敗しました", failed)
+	opt.Logf("\n完了: %d 成功 / %d 失敗\n", len(folders)-len(failures), len(failures))
+	logFailures(opt, failures)
+	if len(failures) > 0 {
+		return fmt.Errorf("%d フォルダで失敗しました", len(failures))
 	}
 	return nil
 }
 
-// ProcessZip は 1 つの zip を「解凍 → リサイズ → 再zip(上書き)」する。
-func ProcessZip(zipPath string, opt Options) error {
+// ProcessZip は 1 つのアーカイブ(zip/cbz/rar/cbr)を「解凍 → リサイズ → zip出力」する。
+// 互換のため名前は ProcessZip のままだが rar も扱える。新規コードは ProcessArchive を推奨。
+func ProcessZip(zipPath string, opt Options) error { return ProcessArchive(zipPath, opt) }
+
+// ProcessArchive は 1 つのアーカイブ(zip/cbz/rar/cbr)を「解凍 → リサイズ → zip出力」する。
+func ProcessArchive(path string, opt Options) error {
 	r, err := opt.resolve()
 	if err != nil {
 		return err
 	}
-	return processZip(zipPath, r)
+	return processArchive(path, r)
 }
 
-func processZip(zipPath string, opt Options) error {
-	dest := zipPath
-	if !opt.Overwrite {
-		dest = withSuffix(zipPath, opt.Suffix)
+// archiveOutPath は出力 zip のパスを決める。出力は常に zip。
+//   Overwrite=false … <stem><Suffix>.zip（元は残す）
+//   Overwrite=true  … zip系は同名で上書き / rar系は <stem>.zip（元rarは別途削除）
+func archiveOutPath(path string, opt Options) string {
+	stem := archiveStem(path)
+	if opt.Overwrite {
+		if isZipArchive(filepath.Base(path)) {
+			return path
+		}
+		return stem + ".zip"
 	}
+	return stem + opt.Suffix + ".zip"
+}
+
+func processArchive(path string, opt Options) error {
+	dest := archiveOutPath(path, opt)
+	isRar := isRarArchive(filepath.Base(path))
 
 	if opt.DryRun {
-		n, err := CountImagesInZip(zipPath, opt.Exts)
-		if err != nil {
-			return err
-		}
-		opt.Logf("  - 画像 %d 枚をリサイズ(geometry=%q) → %s\n",
-			n, opt.ResolveGeometry(), zipDestLabel(zipPath, dest, opt.Overwrite))
+		n := countImagesInArchive(path, opt)
+		opt.Logf("  - 画像 %s 枚をリサイズ(geometry=%q) → %s\n",
+			countLabel(n), opt.ResolveGeometry(), zipDestLabel(path, dest, opt.Overwrite))
 		return nil
 	}
 
 	// 同一ファイルシステム上に一時展開先を作る（最後の rename を atomic にするため）。
-	tmpDir, err := os.MkdirTemp(filepath.Dir(zipPath),
-		".imgpack-"+strings.TrimSuffix(filepath.Base(zipPath), ".zip")+"-")
+	tmpDir, err := os.MkdirTemp(filepath.Dir(path),
+		".imgpack-"+filepath.Base(archiveStem(path))+"-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
 
 	opt.Logf("  - 解凍中…\n")
-	if err := ExtractZip(zipPath, tmpDir); err != nil {
+	if err := extractArchive(path, tmpDir, opt); err != nil {
 		return fmt.Errorf("解凍失敗: %w", err)
 	}
 
@@ -235,9 +268,20 @@ func processZip(zipPath string, opt Options) error {
 		}
 	}
 
-	// 元と同じ内部構造（prefix 無し）で zip 出力。元zipは Overwrite 時のみ上書き。
-	opt.Logf("  - 再zip → %s\n", zipDestLabel(zipPath, dest, opt.Overwrite))
-	return ZipDir(tmpDir, dest, "", opt.Exts)
+	// 元と同じ内部構造（prefix 無し）で zip 出力。
+	opt.Logf("  - zip出力 → %s\n", zipDestLabel(path, dest, opt.Overwrite))
+	if err := ZipDir(tmpDir, dest, "", opt.Exts); err != nil {
+		return err
+	}
+
+	// 上書き指定で rar を zip 化した場合、元 rar は別名(.zip)になるため元ファイルを削除して置き換える。
+	if opt.Overwrite && isRar && dest != path {
+		if err := os.Remove(path); err != nil {
+			return fmt.Errorf("元 rar の削除に失敗: %w", err)
+		}
+		opt.Logf("  - 元 %s を削除(zip化)\n", filepath.Base(path))
+	}
+	return nil
 }
 
 // ProcessFolder はフォルダ内の画像をインプレースでリサイズし <dir>.zip を生成する。
@@ -297,7 +341,25 @@ func processFolder(dir string, opt Options) error {
 	return nil
 }
 
-// FindZips は root 直下の *.zip を返す（隠しファイルは除外）。
+// FindArchives は root 直下のアーカイブ(.zip/.cbz/.rar/.cbr)を返す（隠しファイルは除外）。
+func FindArchives(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		if isArchive(e.Name()) {
+			out = append(out, filepath.Join(root, e.Name()))
+		}
+	}
+	return sortedStrings(out), nil
+}
+
+// FindZips は root 直下の zip 系アーカイブ(.zip/.cbz)を返す（隠しファイルは除外）。
 func FindZips(root string) ([]string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -305,10 +367,10 @@ func FindZips(root string) ([]string, error) {
 	}
 	var zips []string
 	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+		if e.IsDir() {
 			continue
 		}
-		if strings.EqualFold(filepath.Ext(e.Name()), ".zip") {
+		if isZipArchive(e.Name()) {
 			zips = append(zips, filepath.Join(root, e.Name()))
 		}
 	}
@@ -417,6 +479,13 @@ func inplaceLabel(overwrite bool) string {
 		return " [インプレース]"
 	}
 	return " [元を保持]"
+}
+
+func countLabel(n int) string {
+	if n < 0 {
+		return "?"
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func dryLabel(dry bool) string {
