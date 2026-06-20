@@ -1,0 +1,7 @@
+# build artifacts
+/imgpack
+/cmd/imgpack/imgpack
+*.tmp
+
+# test/coverage
+coverage.out
